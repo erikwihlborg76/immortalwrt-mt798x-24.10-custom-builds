@@ -1,0 +1,49 @@
+diff --git a/package/mtk/applications/mtwifi-cfg/files/mtwifi-cfg/mtwifi_cfg b/package/mtk/applications/mtwifi-cfg/files/mtwifi-cfg/mtwifi_cfg
+index c5d9972056..1b5684884e 100755
+--- a/package/mtk/applications/mtwifi-cfg/files/mtwifi-cfg/mtwifi_cfg
++++ b/package/mtk/applications/mtwifi-cfg/files/mtwifi-cfg/mtwifi_cfg
+@@ -425,12 +425,41 @@ function mtwifi_cfg_setup(argv)
+         dats.TWTSupport = 0
+     end
+ 
+-    if type(cfg.config.country) == type("") and #cfg.config.country == 2 then
++    local regions = nil
++    if type(cfg.config.country) == "string" and #cfg.config.country == 2 then
++        regions = defs.countryRegions[cfg.config.country] or { 1, 13, "FCC" }
++    end
++
++    if cfg.config.band == "5g" and regions and regions[2] ~= nil then
++        local rd = regions[3]
++        if rd == "CE" or rd == "FCC" or rd == "JAP" then
++            dats.RDRegion = rd
++            dats.IEEE80211H = 1
++            dats.DfsEnable = 1
++
++            -- MTK value 2 enables the default dedicated zero-wait flow.
++            -- Value 3 is the MT7986-specific adjacent-bandwidth HE160 mode.
++            dats.DfsDedicatedZeroWait = 2
++            dats.DfsZeroWait = 1
++            dats.DfsZeroWaitCacTime = 255
++            dats.DfsZeroWaitDefault = 1
++        else
++            -- RDRegion has no disabled value; clear any previously configured domain.
++            dats.RDRegion = ""
++            dats.IEEE80211H = 0
++            dats.DfsEnable = 0
++            dats.DfsDedicatedZeroWait = 0
++            dats.DfsZeroWait = 0
++            dats.DfsZeroWaitDefault = 0
++        end
++    end
++
++    if regions then
+         dats.CountryCode = cfg.config.country
+         if cfg.config.band == "2g" then
+-            dats.CountryRegion = defs.countryRegions[cfg.config.country][1]
++            dats.CountryRegion = regions[1]
+         elseif cfg.config.band == "5g" then
+-            dats.CountryRegionABand = defs.countryRegions[cfg.config.country][2]
++            dats.CountryRegionABand = regions[2]
+         end
+     end
+ 

@@ -1,0 +1,429 @@
+name: immortalwrt-matrix-build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # ---- IMMORTALWRT SOURCE ----
+  REPO_URL: "https://github.com/padavanonly/immortalwrt-mt798x-6.6"
+  BRANCH: "openwrt-24.10-6.6"
+
+jobs:
+  discover-configs:
+    runs-on: ubuntu-22.04
+    outputs:
+      config_dir: ${{ steps.find-config-dir.outputs.config_dir }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Detect config directory
+        id: find-config-dir
+        run: |
+          set -euo pipefail
+          if [ -d defconfig ]; then
+            echo "config_dir=defconfig" >> "$GITHUB_OUTPUT"
+          else
+            echo "No config directory found. Expected defconfig/."
+            exit 1
+          fi
+
+      - name: Find all device configs
+        id: set-matrix
+        run: |
+          set -euo pipefail
+          configs=()
+          CONFIG_DIR="${{ steps.find-config-dir.outputs.config_dir }}"
+
+          for f in "${CONFIG_DIR}"/*.config; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" .config)
+            if [ "$base" = "mt798x_baseline" ]; then
+              continue
+            fi
+            configs+=("\"$base\"")
+          done
+
+          if [ "${#configs[@]}" -eq 0 ]; then
+            echo "No device profiles found in ${CONFIG_DIR}/."
+            echo "Expected one or more '*.config' files other than mt798x_baseline.config."
+            exit 1
+          fi
+
+          echo "Found ${#configs[@]} profile(s):"
+          for profile in "${configs[@]}"; do
+            echo " - ${profile//\"/}"
+          done
+
+          json=$(printf "{ \"profile\": [ %s ] }" "$(IFS=,; echo "${configs[*]}")")
+          echo "Generated matrix JSON: $json"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover-configs
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover-configs.outputs.matrix) }}
+
+    env:
+      # ---- LOCAL CUSTOMIZATION INPUTS ----
+      CONFIG_DIR: "${{ needs.discover-configs.outputs.config_dir }}"
+
+      # ---- TARGET / PROFILE ----
+      OWRT_TARGET: "mediatek"
+      OWRT_SUBTARGET: "filogic"
+      PROFILE: "${{ matrix.profile }}"
+      BUILD_FLAVOR: "immortalwrt"
+
+      WORKDIR: "${{ github.workspace }}/openwrt"
+
+      CCACHE_DIR: "${{ github.workspace }}/.ccache"
+      CCACHE_COMPRESS: "1"
+      SOURCE_DATE_EPOCH: "1704067200"
+
+    steps:
+      - name: Set build date
+        run: echo "BUILD_DATE=$(date +'%Y%m%d')" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v5
+
+      - name: Free disk (GitHub runners are tiny)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get purge -y 'azure-cli' 'mono-devel' || true
+          sudo apt-get autoremove -y
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3 python3-distutils rsync unzip zlib1g-dev file wget \
+            subversion swig libpython3-dev ccache
+
+      - name: Fetch ImmortalWrt
+        run: |
+          git -c advice.detachedHead=false clone \
+            --single-branch --branch "${BRANCH}" \
+            --depth 1 --filter=blob:none \
+            "${REPO_URL}" "${WORKDIR}"
+
+      # ------------------- CACHES --------------------
+
+      - name: Cache downloads
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.WORKDIR }}/dl
+          key: dl-${{ runner.os }}-${{ env.BRANCH }}-${{ matrix.profile }}
+
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ matrix.profile }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.profile }}-
+
+      # ----------------- FEEDS -----------------------
+
+      - name: Configure feeds
+        run: |
+          set -euo pipefail
+          cd "${WORKDIR}"
+          cp feeds.conf.default feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ---------------- PATCHES ----------------------
+
+      - name: Apply all patches from repo patches/
+        run: |
+          set -eu
+          cd "${WORKDIR}"
+          PATCH_ROOT="${GITHUB_WORKSPACE}/patches"
+          if [ ! -d "${PATCH_ROOT}" ]; then
+            echo "No patches directory; skipping."
+            exit 0
+          fi
+
+          git config user.email "ci@localhost"
+          git config user.name  "CI"
+
+          # Gather patches deterministically
+          mapfile -t PATCHES < <(find -L "${PATCH_ROOT}" -type f \( -iname '*.patch' -o -iname '*.diff' \) | sort)
+          if [ "${#PATCHES[@]}" -eq 0 ]; then
+            echo "No patch files found under ${PATCH_ROOT}; skipping."
+            exit 0
+          fi
+
+          echo "Found ${#PATCHES[@]} patch(es). Applying now:"
+          for p in "${PATCHES[@]}"; do
+            echo " -> $(realpath --relative-to="${PATCH_ROOT}" "$p")"
+            # Convert UTF-16 patches saved by Windows editors, then normalize
+            # CRLF and drop a UTF-8 BOM if an editor added one.
+            case "$(head -c 2 "$p" | od -An -tx1 | tr -d ' \n')" in
+              fffe)
+                iconv -f UTF-16LE -t UTF-8 "$p" > "$p.utf8"
+                mv "$p.utf8" "$p"
+                ;;
+              feff)
+                iconv -f UTF-16BE -t UTF-8 "$p" > "$p.utf8"
+                mv "$p.utf8" "$p"
+                ;;
+            esac
+            sed -i '1s/^\xEF\xBB\xBF//;s/\r$//' "$p"
+
+            # git am only accepts mailbox/format-patch input. Plain diff --git
+            # patches should go straight to git apply, otherwise git am emits
+            # "Patch format detection failed" before the real apply attempt.
+            if head -n 1 "$p" | grep -Eq '^From [0-9a-f]{40} '; then
+              if git am --keep-cr --3way --whitespace=fix "$p"; then
+                continue
+              fi
+              git am --abort || true
+            fi
+
+            # Fallback to git apply with varying strip levels. Prefer -p1 for
+            # git diffs containing a/ and b/ prefixes.
+            applied=0
+            for STRIP in 1 0 2; do
+              if git apply --check --whitespace=fix -p${STRIP} "$p"; then
+                git apply --whitespace=fix -p${STRIP} "$p"
+                git add -A
+                git commit -m "Apply $(basename "$p") via git apply -p${STRIP}"
+                applied=1
+                break
+              fi
+            done
+
+            if [ $applied -eq 0 ]; then
+              echo "ERROR: Failed to apply patch: $p"
+              exit 1
+            fi
+          done
+
+      # ---------------- ROOTFS OVERLAY ---------------
+
+      - name: Rootfs overlay (optional)
+        run: |
+          set -eu
+          if [ -d "${GITHUB_WORKSPACE}/files" ]; then
+            rsync -a "${GITHUB_WORKSPACE}/files/" "${WORKDIR}/files/"
+          else
+            echo "No files overlay; skipping."
+          fi
+
+      # ---------------- CONFIG -----------------------
+
+      - name: Inject config (baseline + device-specific)
+        run: |
+          set -euo pipefail
+          cd "${WORKDIR}"
+
+          BASE_CFG="${GITHUB_WORKSPACE}/${CONFIG_DIR}/mt798x_baseline.config"
+          DEV_CFG="${GITHUB_WORKSPACE}/${CONFIG_DIR}/${PROFILE}.config"
+
+          if [ ! -f "$BASE_CFG" ]; then
+            echo "Missing baseline config: $BASE_CFG"
+            exit 1
+          fi
+
+          if [ ! -f "$DEV_CFG" ]; then
+            echo "Missing device config: $DEV_CFG"
+            exit 1
+          fi
+
+          echo "Using baseline: $BASE_CFG"
+          echo "Using device config: $DEV_CFG"
+
+          # baseline first, then device-specific (device overrides baseline)
+          cat "$BASE_CFG" "$DEV_CFG" > .config
+
+          echo "========== MERGED INPUT CONFIG =========="
+          cat .config
+
+          # enable ccache
+          echo "CONFIG_CCACHE=y" >> .config
+
+          # expand into full .config
+          make defconfig
+
+          echo "========== GENERATED .CONFIG =========="
+          cat .config
+
+          echo "========== GENERATED TARGET/DEVICE SELECTION =========="
+          grep -E '^CONFIG_TARGET_|^# CONFIG_TARGET_' .config | sort || true
+
+      # ---------------- BUILD ------------------------
+
+      - name: Build firmware
+        env:
+          MAKEFLAGS: "-j$(nproc)"
+        run: |
+          set -euo pipefail
+          cd "${WORKDIR}"
+          {
+            make download -j"$(nproc)" || make download -j1 V=s
+
+            # run make, log output, and ensure failure is propagated
+            time make -j"$(nproc)" V=sc
+          } 2>&1 | tee build.log
+
+      # ---------------- ARTIFACTS ---------------------
+      
+      - name: Collect minimal firmware artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="${GITHUB_WORKSPACE}/minimal-artifacts"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          cd "${WORKDIR}"
+
+          # Find all sysupgrade images (generic: .itb, .bin, future-proof)
+          mapfile -t SYSUP < <(
+            find "bin/targets" -type f -name '*-squashfs-sysupgrade.*' | sort
+          )
+
+          if [ "${#SYSUP[@]}" -eq 0 ]; then
+            echo "ERROR: No sysupgrade images found"
+            find "bin/targets" -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+
+          echo "Found sysupgrade images:"
+          printf ' - %s\n' "${SYSUP[@]}"
+
+          # Copy build log (global)
+          if [ -f "${WORKDIR}/build.log" ]; then
+            cp -v "${WORKDIR}/build.log" "$OUT/"
+          fi
+
+          for img in "${SYSUP[@]}"; do
+            dir="$(dirname "$img")"
+            echo "Collecting from: $dir"
+
+            # Copy sysupgrade image
+            cp -v "$img" "$OUT/"
+
+            # Copy metadata files if present (from the same folder as sysupgrade)
+            for f in sha256sums profiles.json config.buildinfo version.buildinfo; do
+              if [ -f "$dir/$f" ]; then
+                cp -v "$dir/$f" "$OUT/"
+              fi
+            done
+          done
+
+          echo "Final artifact contents:"
+          ls -lah "$OUT"
+
+      - name: Upload minimal firmware artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ env.PROFILE }}-${{ env.BUILD_DATE }}
+          path: minimal-artifacts/
+          if-no-files-found: error
+
+  draft-release:
+    needs:
+      - build
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Set release metadata
+        id: release-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_date="$(date -u +'%Y%m%d')"
+          short_sha="${GITHUB_SHA::7}"
+          tag="build-${build_date}-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}-${short_sha}"
+          title="ImmortalWrt build ${build_date}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT} (${short_sha})"
+
+          {
+            echo "tag=${tag}"
+            echo "title=${title}"
+          } >> "$GITHUB_OUTPUT"
+
+          cat > release-notes.md <<EOF
+          Draft firmware build generated by GitHub Actions.
+
+          - Trigger: ${GITHUB_EVENT_NAME}
+          - Source ref: ${GITHUB_REF_NAME}
+          - Commit: ${GITHUB_SHA}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Upstream source: ${REPO_URL}@${BRANCH}
+          EOF
+
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: firmware-*
+          path: downloaded-artifacts
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          shopt -s nullglob
+          artifact_dirs=(downloaded-artifacts/firmware-*)
+
+          if [ "${#artifact_dirs[@]}" -eq 0 ]; then
+            echo "ERROR: No firmware artifacts were downloaded."
+            exit 1
+          fi
+
+          for dir in "${artifact_dirs[@]}"; do
+            [ -d "$dir" ] || continue
+            asset="${GITHUB_WORKSPACE}/release-assets/$(basename "$dir").zip"
+            python3 - "$dir" "$asset" <<'PY'
+          import os
+          import sys
+          import zipfile
+
+          source, destination = sys.argv[1], sys.argv[2]
+
+          with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+              for root, _, files in os.walk(source):
+                  for filename in sorted(files):
+                      path = os.path.join(root, filename)
+                      archive.write(path, os.path.relpath(path, source))
+          PY
+          done
+
+          echo "Release assets:"
+          ls -lah release-assets
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create "${{ steps.release-meta.outputs.tag }}" release-assets/*.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft \
+            --latest=false \
+            --target "${GITHUB_SHA}" \
+            --title "${{ steps.release-meta.outputs.title }}" \
+            --notes-file release-notes.md
