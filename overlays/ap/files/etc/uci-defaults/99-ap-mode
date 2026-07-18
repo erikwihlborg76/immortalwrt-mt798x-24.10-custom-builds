@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Configure the image to boot as a dumb AP on the existing LAN bridge.
+# Configure the AP image to boot as a dumb AP on the existing LAN bridge.
 
 LOG_TAG="99-ap-mode"
 

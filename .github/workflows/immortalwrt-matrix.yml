@@ -64,7 +64,11 @@ jobs:
             echo " - ${profile//\"/}"
           done
 
-          json=$(printf "{ \"profile\": [ %s ] }" "$(IFS=,; echo "${configs[*]}")")
+          echo "Build variants:"
+          echo " - ap"
+          echo " - router"
+
+          json=$(printf "{ \"profile\": [ %s ], \"variant\": [ \"ap\", \"router\" ] }" "$(IFS=,; echo "${configs[*]}")")
           echo "Generated matrix JSON: $json"
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
 
@@ -84,7 +88,8 @@ jobs:
       OWRT_TARGET: "mediatek"
       OWRT_SUBTARGET: "filogic"
       PROFILE: "${{ matrix.profile }}"
-      BUILD_FLAVOR: "immortalwrt"
+      BUILD_VARIANT: "${{ matrix.variant }}"
+      BUILD_FLAVOR: "immortalwrt-${{ matrix.variant }}"
 
       WORKDIR: "${{ github.workspace }}/openwrt"
 
@@ -219,10 +224,31 @@ jobs:
       - name: Rootfs overlay (optional)
         run: |
           set -eu
-          if [ -d "${GITHUB_WORKSPACE}/files" ]; then
-            rsync -a "${GITHUB_WORKSPACE}/files/" "${WORKDIR}/files/"
+
+          case "${BUILD_VARIANT}" in
+            ap|router)
+              ;;
+            *)
+              echo "Unsupported build variant: ${BUILD_VARIANT}"
+              exit 1
+              ;;
+          esac
+
+          COMMON_OVERLAY="${GITHUB_WORKSPACE}/files"
+          VARIANT_OVERLAY="${GITHUB_WORKSPACE}/overlays/${BUILD_VARIANT}/files"
+
+          if [ -d "${COMMON_OVERLAY}" ]; then
+            echo "Applying common rootfs overlay: ${COMMON_OVERLAY}"
+            rsync -a "${COMMON_OVERLAY}/" "${WORKDIR}/files/"
           else
-            echo "No files overlay; skipping."
+            echo "No common rootfs overlay; skipping."
+          fi
+
+          if [ -d "${VARIANT_OVERLAY}" ]; then
+            echo "Applying ${BUILD_VARIANT} rootfs overlay: ${VARIANT_OVERLAY}"
+            rsync -a "${VARIANT_OVERLAY}/" "${WORKDIR}/files/"
+          else
+            echo "No rootfs overlay for ${BUILD_VARIANT}; skipping."
           fi
 
       # ---------------- CONFIG -----------------------
@@ -334,7 +360,7 @@ jobs:
       - name: Upload minimal firmware artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-${{ env.PROFILE }}-${{ env.BUILD_DATE }}
+          name: firmware-${{ env.PROFILE }}-${{ env.BUILD_VARIANT }}-${{ env.BUILD_DATE }}
           path: minimal-artifacts/
           if-no-files-found: error
 

@@ -2,7 +2,8 @@
 
 Custom firmware based on
 [padavanonly/immortalwrt-mt798x-6.6](https://github.com/padavanonly/immortalwrt-mt798x-6.6)
-(`openwrt-24.10-6.6`), built as a preconfigured dumb access point.
+(`openwrt-24.10-6.6`), built in both router and preconfigured dumb access
+point variants.
 
 ## Supported Devices
 
@@ -16,9 +17,19 @@ Custom firmware based on
 - English-focused package selection with MediaTek Wi-Fi/LuCI tools and useful
   diagnostics, without the bundled VPN/proxy extras.
 
+## Build Variants
+
+The GitHub Actions workflow builds every supported device for both variants:
+
+- `ap`: applies the AP-mode rootfs overlay.
+- `router`: uses router defaults unless files are added under
+  `overlays/router/files/`.
+
+Artifacts are named `firmware-<profile>-<variant>-<date>`.
+
 ## AP Overlay
 
-[`files/etc/uci-defaults/99-ap-mode`](files/etc/uci-defaults/99-ap-mode)
+[`overlays/ap/files/etc/uci-defaults/99-ap-mode`](overlays/ap/files/etc/uci-defaults/99-ap-mode)
 applies these settings on first boot:
 
 - Static LAN address `10.0.0.9/24`, with gateway and DNS server `10.0.0.1`.
@@ -36,8 +47,31 @@ applies these settings on first boot:
 After rebooting, manage the device at `http://10.0.0.9/`. Change the default
 Wi-Fi key immediately.
 
+## AP-to-Router Conversion
+
+On the 24.10 LuCI feed used by this build, the DHCP Server tab exposes the
+`dhcp.lan.ignore` checkbox but not the `dhcp.lan.dhcpv4` setting. The AP
+overlay sets both `dhcp.lan.ignore='1'` and `dhcp.lan.dhcpv4='disabled'`, so
+unchecking "Ignore interface" in LuCI may not be enough to turn DHCPv4 service
+back on.
+
+If converting an installed AP image back to router mode, also run this over SSH:
+
+```sh
+uci set dhcp.lan.ignore='0'
+uci set dhcp.lan.dhcpv4='server'
+uci set dhcp.lan.start='100'
+uci set dhcp.lan.limit='150'
+uci set dhcp.lan.leasetime='12h'
+uci commit dhcp
+service dnsmasq restart
+```
+
+Also review the LAN address, gateway, DNS, firewall, and IPv6 settings, since
+the AP overlay changes those away from normal router defaults.
+
 ## Installation
 
-Download the matching draft GitHub Release, extract it, and flash the
-`*squashfs-sysupgrade.itb` image from an existing OpenWrt/ImmortalWrt
-ubootmod installation.
+Download the matching device and variant from the draft GitHub Release, extract
+it, and flash the `*squashfs-sysupgrade.itb` image from an existing
+OpenWrt/ImmortalWrt ubootmod installation.
