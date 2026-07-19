@@ -1,0 +1,47 @@
+#!/bin/sh
+
+# Configure the router image with local LAN and Wi-Fi defaults.
+
+set -eu
+
+LOG_TAG="99-router-mode"
+COMMON_HELPERS="/lib/custom-builds/uci-defaults-common.sh"
+
+if [ ! -r "$COMMON_HELPERS" ]; then
+	printf '%s: ERROR: Required file is unavailable: %s\n' \
+		"$LOG_TAG" "$COMMON_HELPERS" >&2
+	exit 1
+fi
+
+# shellcheck source=/dev/null
+. "$COMMON_HELPERS"
+
+main() {
+	uci set network.lan.proto='static'
+	uci -q delete network.lan.ipaddr || true
+	uci add_list network.lan.ipaddr='10.0.0.1/24'
+	uci -q delete network.lan.netmask || true
+	uci set network.lan.ip6assign='60'
+	uci -q delete network.lan.gateway || true
+	uci -q delete network.lan.dns || true
+	uci commit network
+
+	cb_ensure_dhcp_lan_section
+	uci set dhcp.lan.ignore='0'
+	uci set dhcp.lan.start='100'
+	uci set dhcp.lan.limit='150'
+	uci set dhcp.lan.leasetime='12h'
+	uci set dhcp.lan.dhcpv4='server'
+	uci set dhcp.lan.dhcpv6='server'
+	uci set dhcp.lan.ra='server'
+	uci -q delete dhcp.lan.ndp || true
+	uci -q delete dhcp.lan.ra_flags || true
+	uci add_list dhcp.lan.ra_flags='managed-config'
+	uci add_list dhcp.lan.ra_flags='other-config'
+	uci commit dhcp
+
+	cb_configure_stockholm_timezone
+	cb_apply_wifi_defaults
+}
+
+main "$@"
