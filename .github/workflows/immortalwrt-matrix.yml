@@ -88,8 +88,7 @@ jobs:
       OWRT_TARGET: "mediatek"
       OWRT_SUBTARGET: "filogic"
       PROFILE: "${{ matrix.profile }}"
-      BUILD_VARIANT: "${{ matrix.variant }}"
-      BUILD_FLAVOR: "immortalwrt-${{ matrix.variant }}"
+      IMAGE_VARIANT: "${{ matrix.variant }}"
 
       WORKDIR: "${{ github.workspace }}/openwrt"
 
@@ -225,17 +224,17 @@ jobs:
         run: |
           set -eu
 
-          case "${BUILD_VARIANT}" in
+          case "${IMAGE_VARIANT}" in
             ap|router)
               ;;
             *)
-              echo "Unsupported build variant: ${BUILD_VARIANT}"
+              echo "Unsupported image variant: ${IMAGE_VARIANT}"
               exit 1
               ;;
           esac
 
           COMMON_OVERLAY="${GITHUB_WORKSPACE}/files"
-          VARIANT_OVERLAY="${GITHUB_WORKSPACE}/overlays/${BUILD_VARIANT}/files"
+          VARIANT_OVERLAY="${GITHUB_WORKSPACE}/overlays/${IMAGE_VARIANT}/files"
 
           if [ -d "${COMMON_OVERLAY}" ]; then
             echo "Applying common rootfs overlay: ${COMMON_OVERLAY}"
@@ -245,10 +244,10 @@ jobs:
           fi
 
           if [ -d "${VARIANT_OVERLAY}" ]; then
-            echo "Applying ${BUILD_VARIANT} rootfs overlay: ${VARIANT_OVERLAY}"
+            echo "Applying ${IMAGE_VARIANT} rootfs overlay: ${VARIANT_OVERLAY}"
             rsync -a "${VARIANT_OVERLAY}/" "${WORKDIR}/files/"
           else
-            echo "No rootfs overlay for ${BUILD_VARIANT}; skipping."
+            echo "No rootfs overlay for ${IMAGE_VARIANT}; skipping."
           fi
 
       # ---------------- CONFIG -----------------------
@@ -360,7 +359,7 @@ jobs:
       - name: Upload minimal firmware artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-${{ env.PROFILE }}-${{ env.BUILD_VARIANT }}-${{ env.BUILD_DATE }}
+          name: firmware-${{ env.PROFILE }}-${{ env.IMAGE_VARIANT }}-${{ env.BUILD_DATE }}
           path: minimal-artifacts/
           if-no-files-found: error
 
